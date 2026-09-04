@@ -8,6 +8,10 @@ What was built and where it deviates from the design: [docs/v1_implementation.md
 
 > Not investment advice. Research software. It can lose everything deployed; paper results may not reproduce live.
 
+## Where things run
+
+Everything runs on the lab server (`mediator`). The AI layer is **DeepSeek-V4-Flash served locally** by llama.cpp on GPUs 0–3 (port 8324, from `../llm/`), so no data leaves the machine and model calls cost $0; Qwen3.6 on vLLM (port 8321) is a drop-in alternative. Market bars come from Yahoo Finance (free), headlines from Alpaca's news API, and orders go to an **Alpaca paper account** ($2,000 virtual). A cron job on this server runs the cycle every weekday at 9:40 ET.
+
 ## The idea in one paragraph
 
 Once per trading day after the close, the system pulls daily bars for ~45 liquid large caps and ETFs, validates them, computes a handful of explainable quantitative signals (momentum, trend, volatility, liquidity, market regime), and uses a local LLM to turn recent headlines into structured, bounded "event facts" and a short thesis for the top few candidates. The AI can move a name's score by at most 20%. A deterministic risk engine then clamps everything (80% max gross, 10% per name, 25% per sector, 10 names, 2% daily-loss lock, 10% drawdown safe mode, 20% daily turnover, order-size bounds) and emits order intents. Orders are marketable limit orders for the next session with deterministic IDs so nothing can be submitted twice. The next run reconciles fills against the broker; any disagreement puts the system into safe mode, which blocks new exposure until a human clears it.
@@ -80,5 +84,19 @@ Every run has a `run_id`; every stage writes an artifact row before the next sta
 
 ## Current status (2026-09-04)
 
-- Implemented and tested end-to-end; first real-data shadow and sim runs completed cleanly with the local LLM (29/29 model calls valid), and a 2020–2026 quant-only backtest ran (~12.5%/yr, 10.6% vol, Sharpe 1.2, max DD 11%; survivorship-biased). Numbers and caveats: [docs/v1_implementation.md](docs/v1_implementation.md) §2b–2c.
-- Phase: **paper trading on Alpaca**, started 2026-09-04, cron at 9:40 ET weekdays on this server. Gate to a live pilot: 30 clean paper sessions plus operational review. Watch `runtime/reports/paper/latest.html` and `sea-lion --mode paper status`.
+- **Phase: paper trading on Alpaca, started 2026-09-04.** The first cycle placed 10 fractional limit buys ($400 total, the 20%/day turnover ramp) that Alpaca accepted; they fill at the next open, Tuesday 2026-09-08 (Labor Day Monday). From then on the cron job runs every weekday at 9:40 ET and each morning run reconciles the previous day's fills before deciding.
+- Validated so far: 48 tests; real-data shadow and sim runs with the local LLM (29/29 model calls valid); a 2020–2026 quant-only backtest (~12.5%/yr, 10.6% vol, Sharpe 1.2, max DD 11%, survivorship-biased); Alpaca account/clock/data/news/order/reconcile paths against the live paper API. Details and caveats: [docs/v1_implementation.md](docs/v1_implementation.md) §2b–2d.
+- Gate to a live pilot: 30 clean paper sessions plus an operational review. Nothing can trade real money before that.
+
+## Daily operations
+
+```bash
+source scripts/env.sh
+sea-lion --mode paper status               # equity, safe mode, open orders, sessions completed, AI budget
+open runtime/reports/paper/latest.html     # today's decisions, risk reasons, orders, costs
+tail -f runtime/logs/cron.log              # what cron did this morning
+sea-lion --mode paper safe-mode --clear --who <you>   # only after reviewing a SAFE MODE banner
+sea-lion --mode paper kill                 # emergency: cancel all open orders, block new exposure
+```
+
+If the LLM server is down at 9:40 ET the run proceeds quant-only and says so in the report; bring it back with `../llm/serve.sh v4gguf --daemon`.
