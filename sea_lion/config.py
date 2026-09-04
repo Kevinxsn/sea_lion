@@ -23,12 +23,12 @@ DEFAULT_CONFIG = REPO_ROOT / "config" / "default.yaml"
 
 Mode = Literal["backtest", "shadow", "sim", "paper", "live"]
 
-_ENV_RE = re.compile(r"\$\{([A-Z0-9_]+)\}")
+_ENV_RE = re.compile(r"\$\{([A-Z0-9_]+)(?::-([^}]*))?\}")   # ${VAR} or ${VAR:-default}
 
 
 def _sub_env(obj: Any) -> Any:
     if isinstance(obj, str):
-        return _ENV_RE.sub(lambda m: os.environ.get(m.group(1), ""), obj)
+        return _ENV_RE.sub(lambda m: os.environ.get(m.group(1)) or (m.group(2) or ""), obj)
     if isinstance(obj, list):
         return [_sub_env(x) for x in obj]
     if isinstance(obj, dict):

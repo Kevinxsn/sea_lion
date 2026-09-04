@@ -96,6 +96,16 @@ Reading: the 80% gross cap, 10% per-name cap, and regime scaling do what they ar
 
 Qualitative check of the theses: the model correctly flagged Apple's CEO transition as a risk rather than a catalyst (impact −0.15, confidence 0.55 → neutral), treated an analyst target raise on a name that is −15% over 20 days as low-confidence, and cited only supplied event ids. No hallucinated evidence ids in 29 calls.
 
+### 2d. Deployment, 2026-09-04 evening
+
+- Alpaca paper keys verified: account ACTIVE, $2,000 equity, no positions; clock, order lookup, bars, latest trades and news all answered.
+- **Bars stay on Yahoo**: Alpaca's free IEX feed reported SPY volume of ~1.0M shares on 2026-09-04 versus ~50M+ consolidated, which would fail the $20M dollar-volume screen for most of the universe. **News moved to Alpaca** (Benzinga headlines with exact timestamps).
+- `SEA_LION_MODE=paper` in `.env`; `broker.provider: alpaca`, `data.events_provider: alpaca` in the config. Shadow/sim modes still use the local simulator regardless of that setting.
+- Decision date rule: before 16:15 ET the run uses the previous session (Yahoo returns the in-progress day as a partial bar); after that, today. Fresh prices at submit time come from Alpaca's latest trade.
+- Cron installed for user `sux002` on this server: `40 6 * * 1-5` (9:40 ET) → `scripts/run_daily.sh` → `runtime/logs/cron.log`. Next session is Tuesday 2026-09-08 (Labor Day). The design's shadow gate is subsumed: paper mode carries the same zero capital risk and additionally exercises the broker path, which shadow cannot.
+- First paper cycle `2026-09-04-paper-1371f3bd`, run manually at 18:27 ET: status ok; 90 Alpaca headlines ingested; reconciliation clean; **10 fractional DAY limit buys accepted by Alpaca** ($400 total, the 20%/day turnover ramp), confirmed by querying the broker's open orders by `client_order_id`. They queue for the 09-08 open; the 09-09 morning run reconciles the fills.
+- That run also exercised a failure path for real: `.env` had no `SEA_LION_LOCAL_LLM_URL`, the router refused the empty host (allowlist), every model call was logged as an error, and the run continued **quant-only** with the `ai_unavailable_quant_only` flag, which paper mode permits by design. Fixed by giving the config `${VAR:-default}` support with the local server as the default and adding the two lines to `.env`, so the 09-08 run will have the AI layer.
+
 ## 3. Failure-handling map (design §9)
 
 | Failure | Implemented response | Test |
@@ -114,12 +124,11 @@ Qualitative check of the theses: the model correctly flagged Apple's CEO transit
 - [x] Duplicate-submission tests create at most one broker order — `test_duplicate_submission_creates_one_order`, resume test.
 - [x] Stale data, invalid model output, broker ambiguity, state mismatch fail safely — section 3.
 - [x] Daily report separates strategy return, benchmark, trading costs, API/data costs — `report.py`.
-- [ ] 30 paper sessions before any live order — enforced in `_live_gate`; not yet started (needs keys).
+- [ ] 30 paper sessions before any live order — enforced in `_live_gate`; paper trading started 2026-09-04.
 
 ## 5. What is not done / known gaps
 
-- Alpaca adapter and Anthropic provider are written to the SDK docs but not exercised end-to-end (no credentials).
-- The repository has no commits yet, so run records show `code nogit`; commit before starting the 10-session shadow count so every run carries a real code hash.
+- Anthropic provider is written to the SDK docs but not exercised (no key; not needed while the local model does the job).
 - The AI tier is slow on DeepSeek-V4-Flash (~10 min per session for ~130 headlines). Qwen3.6 on vLLM with `extra_body: {chat_template_kwargs: {enable_thinking: false}}` should be several times faster if that matters.
 - No alerting channel (email/Slack); failures are in `runtime/logs/sea_lion.log`, the run row, and the report. Cron captures stderr.
 - Sector tags are hand-maintained in `config/default.yaml`.

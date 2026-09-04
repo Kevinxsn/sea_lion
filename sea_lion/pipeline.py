@@ -218,7 +218,14 @@ class Pipeline:
 
     # ------------------------------------------------------------------ stages
     def _default_as_of(self) -> date:
-        return datetime.now(timezone.utc).date()
+        """Decision date = the last COMPLETED session. Before 16:15 ET the current day's bar is
+        still forming (Yahoo returns it as a partial bar), so use the previous calendar day and
+        let ingest collapse it onto the last real bar."""
+        from zoneinfo import ZoneInfo
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        if now_et.hour < 16 or (now_et.hour == 16 and now_et.minute < 15):
+            return (now_et - timedelta(days=1)).date()
+        return now_et.date()
 
     def st_ingest(self, run_id: str, ctx: Ctx, replay_of: Optional[str] = None) -> Dict[str, Any]:
         u = self.cfg.universe
@@ -452,17 +459,29 @@ class Pipeline:
             fresh = ctx.account["prices"]
             market_open_next = True
         else:
-            try:
-                fresh = self.market_data().latest_prices([i.symbol for i in res.intents])
-            except Exception as e:  # noqa: BLE001
-                log.warning("fresh price fetch failed (%s); using close", e)
-                fresh = ctx.account["prices"]
-            market_open_next = True
+            fresh = self._fresh_prices([i.symbol for i in res.intents]) or ctx.account["prices"]
+            clock = ctx.account.get("clock") or {}
+            market_open_next = bool(clock.get("is_open") or clock.get("next_open"))
         rep = execution.execute(res.intents, br, self.store, self.cfg, run_id, fresh, market_open_next)
         if rep.ambiguous:
             self.store.enter_safe_mode(f"ambiguous broker response for {[a['symbol'] for a in rep.ambiguous]}", run_id)
         ctx.execution = rep.to_dict()
         return ctx.execution
+
+    def _fresh_prices(self, symbols: List[str]) -> Dict[str, float]:
+        """Latest trade from Alpaca when keys exist (works after hours too), else the data adapter."""
+        k, sec = self.cfg.alpaca_keys()
+        if k and sec:
+            try:
+                from .data.alpaca_source import AlpacaData
+                return AlpacaData(k, sec).latest_prices(symbols)
+            except Exception as e:  # noqa: BLE001
+                log.warning("alpaca latest-trade fetch failed (%s)", e)
+        try:
+            return self.market_data().latest_prices(symbols)
+        except Exception as e:  # noqa: BLE001
+            log.warning("fresh price fetch failed (%s); using close", e)
+            return {}
 
     def _live_gate(self) -> None:
         import os

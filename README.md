@@ -18,8 +18,8 @@ Once per trading day after the close, the system pulls daily bars for ~45 liquid
 |---|---|---|---|---|---|
 | `backtest` | Yahoo history | off (by design) | in-memory simulator | simulated | multi-year quant-only evaluation |
 | `shadow` | live Yahoo | on | none | never | "would have done" decisions, zero risk |
-| `sim` | live Yahoo | on | **local fill simulator**, no keys | simulated next-open fills | full loop without a broker account ← *current phase* |
-| `paper` | Yahoo or Alpaca | on | Alpaca paper | real paper orders | 30-session gate before live |
+| `sim` | live Yahoo | on | **local fill simulator**, no keys | simulated next-open fills | full loop without a broker account |
+| `paper` | Yahoo bars + Alpaca news | on | Alpaca paper | real paper orders | **current phase**; 30-session gate before live |
 | `live` | Alpaca | on | Alpaca live | real money | needs env flag + daily token + 30 paper sessions + `--i-understand-live` |
 
 ## Quick start
@@ -81,4 +81,4 @@ Every run has a `run_id`; every stage writes an artifact row before the next sta
 ## Current status (2026-09-04)
 
 - Implemented and tested end-to-end; first real-data shadow and sim runs completed cleanly with the local LLM (29/29 model calls valid), and a 2020–2026 quant-only backtest ran (~12.5%/yr, 10.6% vol, Sharpe 1.2, max DD 11%; survivorship-biased). Numbers and caveats: [docs/v1_implementation.md](docs/v1_implementation.md) §2b–2c.
-- Phase: **shadow/sim**. Next gates per the design: 10 clean shadow sessions → 30 paper sessions on Alpaca (needs paper keys) → live pilot.
+- Phase: **paper trading on Alpaca**, started 2026-09-04, cron at 9:40 ET weekdays on this server. Gate to a live pilot: 30 clean paper sessions plus operational review. Watch `runtime/reports/paper/latest.html` and `sea-lion --mode paper status`.
