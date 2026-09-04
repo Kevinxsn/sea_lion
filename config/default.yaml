@@ -155,7 +155,7 @@ ai:
     claude-haiku-4-5: {input: 1.0, output: 5.0}
 
 broker:
-  provider: sim                # sim (local simulated fills) | alpaca
+  provider: alpaca                # sim (local simulated fills) | alpaca
   initial_cash: 2000.0         # sim broker only
   limit_offset_bps: 15         # marketable limit: buy at last*(1+bps), sell at last*(1-bps)
   order_timeout_sec: 900
