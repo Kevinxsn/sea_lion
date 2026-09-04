@@ -1,0 +1,14 @@
+# secrets and local runtime
+.env
+runtime
+*.db
+*.sqlite
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+reports/

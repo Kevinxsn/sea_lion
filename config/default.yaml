@@ -1,0 +1,176 @@
+# Sea Lion V1 configuration. Everything that is "strategy" or "policy" lives here,
+# versioned in git, so a run can be reproduced from (code version, config hash, inputs).
+# Environment variables (.env) hold ONLY credentials and the run mode override.
+
+run:
+  mode: shadow                 # backtest | shadow | sim | paper | live  (env SEA_LION_MODE overrides)
+  strategy_version: "v1.0"
+  timezone: America/New_York
+  decision_time_local: "16:30" # after the close; orders are for the next session
+
+universe:
+  benchmark: SPY
+  # 20-50 liquid U.S. large caps + broad/sector ETFs. Sector tags feed the 25% sector cap.
+  symbols:
+    AAPL:  Technology
+    MSFT:  Technology
+    NVDA:  Technology
+    AVGO:  Technology
+    ORCL:  Technology
+    AMZN:  Consumer Discretionary
+    TSLA:  Consumer Discretionary
+    HD:    Consumer Discretionary
+    GOOGL: Communication Services
+    META:  Communication Services
+    NFLX:  Communication Services
+    BRK-B: Financials
+    JPM:   Financials
+    V:     Financials
+    MA:    Financials
+    BAC:   Financials
+    UNH:   Health Care
+    LLY:   Health Care
+    JNJ:   Health Care
+    ABBV:  Health Care
+    MRK:   Health Care
+    XOM:   Energy
+    CVX:   Energy
+    COST:  Consumer Staples
+    WMT:   Consumer Staples
+    PG:    Consumer Staples
+    KO:    Consumer Staples
+    PEP:   Consumer Staples
+    CAT:   Industrials
+    GE:    Industrials
+    HON:   Industrials
+    LIN:   Materials
+    NEE:   Utilities
+    PLD:   Real Estate
+    # ETFs. Broad-market ETFs get their own "Broad" sector so they are not
+    # double counted against single-name sector caps.
+    SPY:   Broad
+    QQQ:   Broad
+    IWM:   Broad
+    XLK:   Technology
+    XLF:   Financials
+    XLV:   Health Care
+    XLE:   Energy
+    GLD:   Commodities
+    TLT:   Bonds
+
+data:
+  provider: yfinance           # yfinance | alpaca   (alpaca needs paper keys)
+  lookback_days: 420           # calendar days of history to pull (>= 60 trading days + MA50 + buffer)
+  max_staleness_days: 4        # latest bar must be within this many calendar days of the decision date
+  events_provider: yfinance    # yfinance | alpaca | file | none
+  events_lookback_days: 2
+  events_max_per_symbol: 3
+  events_file: null            # for events_provider=file: path to JSON list of approved events
+
+features:
+  mom_short: 20
+  mom_long: 60
+  skip_last_day: 1             # momentum excludes the most recent day
+  trend_ma: 50
+  vol_window: 20
+  volume_ma: 20
+  winsor_pct: 0.05             # two-sided winsorization within the universe cross-section
+  min_dollar_volume: 20000000  # eligibility: 20-day average dollar volume >= $20M
+
+strategy:
+  max_positions: 10
+  ai_weight_cap: 0.20          # AI share of the ensemble score, hard capped
+  signal_weights:              # quant sub-signal weights (renormalized to 1)
+    mom_short: 0.30
+    mom_long:  0.35
+    trend:     0.25
+    volume:    0.10
+  min_candidate_score: 0.0     # only positive ensemble scores are long candidates
+  require_above_trend: true    # trend filter: price must be above its 50d MA
+  regime:                      # scales total exposure by SPY regime
+    bull: 1.00                 # SPY > MA50 and vol below threshold
+    neutral: 0.60
+    bear: 0.30                 # SPY < MA50 and/or vol above threshold
+    spy_vol_threshold: 0.25    # annualized 20d realized vol
+  sizing: inverse_vol          # inverse_vol | equal
+
+risk:
+  gross_exposure_max: 0.80
+  single_position_max: 0.10
+  max_positions: 10
+  sector_max: 0.25
+  daily_loss_lock: 0.02        # of start-of-day equity
+  drawdown_safe_mode: 0.10     # from high-water mark
+  turnover_max: 0.20           # of equity per day (non risk-reducing trades scaled)
+  min_order_notional: 10.0
+  max_order_notional_frac: 0.10
+  min_model_confidence: 0.60   # below this, AI score is neutral (0)
+  max_data_staleness_days: 4
+
+ai:
+  enabled: true
+  prompt_version: v1
+  schema_version: v1
+  main_top_n: 5                # send at most this many candidates to the main model
+  importance_threshold: 0.50   # ... or any event above this importance
+  max_events_per_call: 6       # small batches: local reasoning models spend many tokens per item
+  retry_invalid_once: true
+  # If the AI layer is unavailable, orders are only allowed in these modes (design §5 fallback rule).
+  quant_only_orders_allowed_modes: [sim, paper]
+  # Reasoning models (DeepSeek-V4, Qwen3.6) think before answering; the budget must cover the
+  # thinking or the answer is empty. A truncated call is retried once with double the budget.
+  cheap:
+    provider: openai_compat    # openai_compat (local vLLM/llama.cpp) | anthropic
+    base_url: ${SEA_LION_LOCAL_LLM_URL}
+    model: ${SEA_LION_LOCAL_LLM_MODEL}
+    max_tokens: 6000
+    timeout_sec: 600
+    temperature: 0.0
+    concurrency: 4             # llama.cpp server runs with -np 4; vLLM batches freely
+    extra_body: {}             # e.g. for Qwen3 on vLLM: {chat_template_kwargs: {enable_thinking: false}}
+  main:
+    provider: openai_compat
+    base_url: ${SEA_LION_LOCAL_LLM_URL}
+    model: ${SEA_LION_LOCAL_LLM_MODEL}
+    max_tokens: 8000
+    timeout_sec: 900
+    temperature: 0.0
+    concurrency: 2
+    extra_body: {}
+  # Only providers on this allowlist may be called.
+  allowed_providers: [openai_compat, anthropic]
+  allowed_hosts: ["127.0.0.1", "localhost", "api.anthropic.com"]
+  budget:
+    daily_usd: 0.50
+    monthly_cheap_usd: 5.0
+    monthly_main_usd: 10.0
+    monthly_total_usd: 25.0
+    soft_stop_fraction: 0.80   # disable optional (main-model) calls at 80%
+    daily_tokens: 400000
+  # USD per 1M tokens. Local models are free but still counted in tokens.
+  pricing:
+    default: {input: 0.0, output: 0.0}
+    claude-opus-5: {input: 5.0, output: 25.0}
+    claude-sonnet-5: {input: 2.0, output: 10.0}
+    claude-haiku-4-5: {input: 1.0, output: 5.0}
+
+broker:
+  provider: sim                # sim (local simulated fills) | alpaca
+  initial_cash: 2000.0         # sim broker only
+  limit_offset_bps: 15         # marketable limit: buy at last*(1+bps), sell at last*(1-bps)
+  order_timeout_sec: 900
+  sim_slippage_bps: 5
+  sim_commission_usd: 0.0
+  paper_sessions_required_before_live: 30
+  allowed_order_types: [limit]
+  trading_hours_only: true
+
+costs:
+  data_monthly_usd: 0.0
+  hosting_monthly_usd: 0.0
+  monthly_ceiling_usd: 25.0
+  pause_live_if_cost_frac_of_equity: 0.005
+
+reporting:
+  write_html: true
+  write_json: true
