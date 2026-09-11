@@ -261,7 +261,12 @@ class Store:
         return [dict(r) for r in self.q("SELECT * FROM orders WHERE run_id=? ORDER BY symbol", (run_id,))]
 
     def open_orders(self) -> List[Dict[str, Any]]:
-        return [dict(r) for r in self.q("SELECT * FROM orders WHERE status IN ('new','submitted','partially_filled','accepted')")]
+        """Every locally-recorded order whose broker status is still open. The status set MUST be the
+        broker's (base.OPEN_STATUSES): on 2026-09-09 'pending_new' was missing here, so fills were never
+        counted and reconciliation raised a false mismatch."""
+        from .broker.base import OPEN_STATUSES
+        marks = ",".join("?" * len(OPEN_STATUSES))
+        return [dict(r) for r in self.q(f"SELECT * FROM orders WHERE status IN ({marks})", sorted(OPEN_STATUSES))]
 
     # ---- equity / safe mode / kv ------------------------------------------
     def save_equity(self, date: str, mode: str, equity: float, cash: float, positions: Dict[str, Any],

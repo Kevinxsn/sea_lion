@@ -82,6 +82,10 @@ Every run has a `run_id`; every stage writes an artifact row before the next sta
 - **AI can never**: pick order types, sizes, accounts, or credentials. It returns validated JSON; prose is stored, never parsed into orders. Headlines are wrapped as untrusted data. Invalid output → retry once → neutral.
 - **Budgets:** per-day and per-month USD/token caps; main-model calls stop at 80%, everything stops at 100%. The local model costs $0 but is still metered.
 
+## Week-one review (2026-09-11)
+
+Read [docs/review_v1.md](docs/review_v1.md). Short version: the loop ran every weekday, 19 of 21 orders filled, no duplicates or crashes; a bookkeeping bug (Alpaca's `pending_new` status missing from our open-order query) put the system into safe mode on Sep 10, which is exactly the fail-safe behaviour intended, and is fixed with regression tests. Safe mode must be cleared by a person: `sea-lion --mode paper safe-mode --clear --who <you>`. Add `MAILTO` to the crontab so this cannot go unnoticed again.
+
 ## Current status (2026-09-04)
 
 - **Phase: paper trading on Alpaca, started 2026-09-04.** The first cycle placed 10 fractional limit buys ($400 total, the 20%/day turnover ramp) that Alpaca accepted; they fill at the next open, Tuesday 2026-09-08 (Labor Day Monday). From then on the cron job runs every weekday at 9:40 ET and each morning run reconciles the previous day's fills before deciding.

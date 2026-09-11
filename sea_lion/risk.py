@@ -40,6 +40,7 @@ class OrderIntent:
     notional: float           # positive dollars
     reference_price: float
     reason: str = "rebalance"
+    close_position: bool = False   # sell the ENTIRE held quantity (target ~0): avoids dust from qty rounding
 
     @property
     def qty(self) -> float:
@@ -191,7 +192,10 @@ def evaluate(proposal: Dict[str, float], acct: AccountState, sectors: Dict[str, 
         else:
             # sells: can't sell more than we hold
             delta = -min(-delta, acct.position_value(s))
-        intents.append(OrderIntent(s, "buy" if delta > 0 else "sell", abs(delta), px))
+        # if what would remain is below the minimum order size, close the whole position instead
+        remaining = acct.position_value(s) + delta
+        close = delta < 0 and remaining < cfg.min_order_notional
+        intents.append(OrderIntent(s, "buy" if delta > 0 else "sell", abs(delta), px, close_position=close))
 
     # ---- turnover: scale non-risk-reducing (buy) intents ------------------
     turnover = sum(i.notional for i in intents) / acct.equity if acct.equity > 0 else 0.0

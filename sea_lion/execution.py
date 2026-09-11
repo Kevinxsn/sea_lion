@@ -81,7 +81,8 @@ def execute(intents: List[OrderIntent], broker: Broker, store: Store, cfg: Setti
         lim = limit_price(fresh, it.side, cfg.broker.limit_offset_bps)
         qty = round(it.notional / lim, 4)
         if it.side == "sell":
-            qty = min(qty, round(pos_qty, 4))
+            # closing: use the broker's exact held quantity so no dust is left behind
+            qty = pos_qty if it.close_position else min(qty, round(pos_qty, 4))
         if qty <= 0:
             rep.skipped.append({"symbol": it.symbol, "cid": cid, "why": "zero_qty"})
             continue

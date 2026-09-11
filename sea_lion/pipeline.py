@@ -156,6 +156,14 @@ class Pipeline:
         except Abort as a:
             status, err = a.status, str(a)
             log.warning("run %s aborted: %s (%s)", run_id, a.status, a)
+            if a.status == "skipped_already_completed" and self.cfg.submits_orders and not replay:
+                try:   # keep order/position state fresh even when no new decision is due
+                    rec = R.reconcile(self.store, self.broker(), self.cfg, run_id)
+                    self.store.stage_start(run_id, "reconcile_only")
+                    self.store.stage_done(run_id, "reconcile_only", rec)
+                    log.info("skipped run reconciled: %s", {k: rec[k] for k in ("ok", "updated", "canceled_stale")})
+                except Exception as e:  # noqa: BLE001
+                    log.error("reconcile-only failed: %s", e)
         except Exception as e:  # noqa: BLE001
             status, err = "error", f"{type(e).__name__}: {e}"
             log.error("run %s failed:\n%s", run_id, traceback.format_exc())
