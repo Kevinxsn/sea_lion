@@ -167,6 +167,8 @@ def test_live_gate_blocks_without_flags(cfg, fake_llm, monkeypatch):
     r = _pipe(cfg, store, bars, [])[0].run(as_of=date.fromisoformat(max(bars["date"])))
     assert r["status"] == "live_blocked"
     monkeypatch.setenv("SEA_LION_LIVE_ENABLED", "1")
-    monkeypatch.setenv("SEA_LION_LIVE_CONFIRM_TOKEN", f"LIVE-{date.today().isoformat()}")
+    from datetime import datetime
+    from sea_lion.calendar import ET
+    monkeypatch.setenv("SEA_LION_LIVE_CONFIRM_TOKEN", f"LIVE-{datetime.now(ET).date().isoformat()}")
     r2 = _pipe(cfg, store, bars, [])[0].run(as_of=date.fromisoformat(max(bars["date"])), force=True)
     assert r2["status"] == "live_blocked" and "paper sessions" in r2["error"]

@@ -101,16 +101,23 @@ class ModelRouter:
                           "schema": schema_name, "system": system, "user": user}, sort_keys=True)
         return hashlib.sha256(key.encode()).hexdigest()
 
+    def call_pass(self, tier: str, label: str, system: str, user: str, model_cls: Type[BaseModel],
+                  validator=None) -> Optional[BaseModel]:
+        """V2 generic pass: `tier` picks the provider config (cheap|main), `label` is recorded as the
+        pass name in model_calls. Same cache, budget, validation and retry rules as V1 calls."""
+        return self._call(tier, system, user, model_cls, validator, label=label)
+
     def _call(self, tier: str, system: str, user: str, model_cls: Type[BaseModel],
-              validator) -> Optional[BaseModel]:
+              validator, label: Optional[str] = None) -> Optional[BaseModel]:
         """Returns a validated object or None (=> neutral). Never raises for model problems."""
         stats = self.state.cheap if tier == "cheap" else self.state.main
         tcfg = self.cfg.cheap if tier == "cheap" else self.cfg.main
-        ih = self._input_hash(tier, system, user, model_cls.__name__)
+        log_tier = label or tier
+        ih = self._input_hash(log_tier, system, user, model_cls.__name__)
         cached = self.store.cache_get(ih)
         if cached is not None:
             stats.cache_hits += 1
-            self.store.log_model_call(run_id=self.run_id, tier=tier, provider=tcfg.provider, model=tcfg.model,
+            self.store.log_model_call(run_id=self.run_id, tier=log_tier, provider=tcfg.provider, model=tcfg.model,
                                       prompt_version=self.cfg.prompt_version, schema_version=self.cfg.schema_version,
                                       input_hash=ih, cache_hit=1, input_tokens=0, output_tokens=0, latency_ms=0,
                                       cost_usd=0.0, valid=1, output_json=cached)
@@ -136,7 +143,7 @@ class ModelRouter:
                 last_err = str(e)
                 self.state.provider_unavailable = True
                 log.warning("%s provider error (attempt %d): %s", tier, attempt + 1, e)
-                self._log(tier, tcfg, ih, None, 0, 0, 0, 0.0, valid=0, error=last_err, raw=None)
+                self._log(log_tier, tcfg, ih, None, 0, 0, 0, 0.0, valid=0, error=last_err, raw=None)
                 continue
             cost = self._price(tcfg.model, resp.input_tokens, resp.output_tokens)
             stats.calls += 1
@@ -150,10 +157,10 @@ class ModelRouter:
             if resp.error:
                 err = resp.error
                 obj = None
-            self._log(tier, tcfg, ih, obj, resp.input_tokens, resp.output_tokens, resp.latency_ms, cost,
+            self._log(log_tier, tcfg, ih, obj, resp.input_tokens, resp.output_tokens, resp.latency_ms, cost,
                       valid=int(obj is not None), error=err, raw=resp.text)
             if obj is not None:
-                self.store.cache_put(ih, tier, tcfg.provider, tcfg.model, self.cfg.prompt_version,
+                self.store.cache_put(ih, log_tier, tcfg.provider, tcfg.model, self.cfg.prompt_version,
                                      self.cfg.schema_version, obj.model_dump())
                 return obj
             stats.invalid += 1

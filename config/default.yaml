@@ -146,7 +146,7 @@ ai:
     monthly_main_usd: 10.0
     monthly_total_usd: 25.0
     soft_stop_fraction: 0.80   # disable optional (main-model) calls at 80%
-    daily_tokens: 400000
+    daily_tokens: 5000000          # local model: tokens cost $0 but are still bounded (V2 research ~1-2M/day on a reasoning model)
   # USD per 1M tokens. Local models are free but still counted in tokens.
   pricing:
     default: {input: 0.0, output: 0.0}
@@ -174,3 +174,76 @@ costs:
 reporting:
   write_html: true
   write_json: true
+
+notify:
+  enabled: true
+  email_to: ["kevinxsn@outlook.com"]      # owner / alert contact (design §19.2). Config, not code.
+  email_from: "sea-lion@mediator.sdsc.edu"
+  transport: sendmail                      # sendmail | smtp | fake | none
+  smtp_host: 127.0.0.1
+  smtp_port: 25
+  email_severities: [critical, warning]    # info is report-only
+
+# ---------------------------------------------------------------- V2 (design v2.1)
+v2:
+  enabled: true
+  calendar:
+    provider: alpaca                       # official sessions incl. early closes; fallback = weekday heuristic
+    research_time_local: "16:30"
+    decision_window_local: ["09:35", "15:30"]   # paper/live submission only inside regular hours
+  sources:
+    news_primary: alpaca                   # Benzinga via Alpaca, full content, multi-symbol, revisions
+    news_fallback: yfinance                # flagged as degraded provenance when used
+    news_include_content: true
+    news_max_content_chars: 6000
+    sec_enabled: true                      # EDGAR submissions (8-K/10-Q/10-K) + XBRL fundamentals, point-in-time by filed date
+    sec_user_agent: "sea-lion research (contact: kevinxsn@outlook.com)"
+    sec_forms: ["8-K", "10-Q", "10-K", "8-K/A", "10-Q/A", "10-K/A"]
+    sec_lookback_days: 5
+    fred_enabled: true
+    fred_series: [DGS10, DGS2, T10Y2Y, VIXCLS, BAMLH0A0HYM2, DTWEXBGS]
+    fundamentals_enabled: true
+  research:
+    enabled: true
+    max_documents_per_symbol: 4            # extraction cap per symbol (filings first, then by source quality)
+    max_claims_per_event: 12
+    material_importance: 0.5
+    macro_gate_importance: 0.70            # generic macro excluded from company analysis below this
+    analyst_requires_corroboration: true
+    main_candidates: 8
+    reserve_for_filings: 3
+    skeptic_enabled: true
+    context_enabled: true
+    disagreement_abstain: 0.5
+    evidence_quality_floor: 0.4
+    shrink_to_half: 0.5                    # until >= 60 scored forecasts, p is shrunk halfway to 0.5
+    horizons: [5, 10, 20]
+    stage_deadline_sec: 1800           # after-close job: per stage (extraction, candidate passes); target is lower, this is the cap
+    morning_deadline_sec: 600
+    morning_target_sec: 180
+    morning_delta_max_docs: 6              # overnight delta: only candidates/holdings, filings + good sources first
+    concurrency: 4
+  hysteresis:                              # design §12.1; shadow challenger until evaluated after costs
+    enabled: false
+    entry_rank: 10
+    retention_rank: 15
+    score_band: 0.05
+    replacement_margin: 0.08
+    round_trip_cost: 0.0010
+  arms:                                    # design §15.3: A quant-only, B V1 headline overlay, C V2 verified-event overlay
+    enabled: true
+    orders_arm: B                          # predeclared; the others are shadow portfolios with simulated fills
+    shadow_slippage_bps: 5.0
+  portfolio_risk:                          # design §13 additions
+    correlation_cluster_max: 0.25
+    correlation_threshold: 0.80
+    correlation_window: 60
+    beta_max: 1.0
+    max_binary_events: 2
+    scenarios: {"market_-3pct": -0.03, "tech_-5pct": -0.05, "largest_gap_-10pct": -0.10}
+    require_multiplier_one_live: true
+    spread_max_bps: 30
+  feature_version: "v2.0"
+  forecast_version: "v2.0"
+  prompt_version: "v2"
+  calibration_min_samples: 60

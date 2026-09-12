@@ -34,7 +34,8 @@ source scripts/env.sh                  # NVMe venv on PATH, loads .env
 cp .env.example .env                   # fill in keys when you have them (optional for shadow/sim)
 
 sea-lion check-llm                     # local LLM reachable + returns valid JSON
-sea-lion --mode shadow run             # one decision cycle, no orders (~10 min, mostly LLM time)
+sea-lion --mode shadow research        # after-close research job (documents, features, arm B + arm C)
+sea-lion --mode shadow run             # morning decision cycle, no orders
 sea-lion --mode sim run                # one cycle with simulated fills
 sea-lion --mode sim status             # equity, safe mode, open orders, budget
 sea-lion --mode backtest backtest --start 2020-01-02
@@ -51,7 +52,16 @@ Daily automation: `scripts/run_daily.sh` from cron on weekdays after the close (
 ```
 config/default.yaml        all policy: universe+sectors, signals, limits, AI routing, budgets  (git-versioned, hashed into every run)
 sea_lion/
-  config.py                typed settings; ${ENV} substitution; paper/live DB separation
+  config.py                typed settings; ${ENV} substitution; paper/live DB separation; v2 + notify sections
+  calendar.py              official sessions/early closes (Alpaca) with fallback; decision window; last completed session
+  notify.py                health events + email (sendmail/SMTP/fake) with audited delivery attempts
+  data/documents.py        point-in-time SourceDocument, hashing, dedup, quarantine, on-disk bodies
+  data/edgar.py, fred.py   SEC EDGAR filings + XBRL fundamentals; FRED macro
+  events/                  entity registry, canonical-event clustering, routing policy
+  ai/v2_*.py, ai/research.py   V2 pass contracts, prompts, and the multi-pass orchestrator with deadlines
+  portfolio.py             rank hysteresis, correlation clusters, beta, scenario checks
+  forecasts.py             frozen forecasts, 5/10/20-session outcomes, calibration, overlay
+  arms.py                  A/B/C champion/challenger portfolios, shadow fills, divergence
   store.py                 SQLite: runs, stage artifacts, bars, events, AI cache, model calls, decisions, orders, equity, costs, safe mode
   data/                    market data + events: yfinance (default, free), alpaca, file, validation
   features.py              point-in-time rolling features; cross-sectional winsorize+z-score; regime
@@ -82,6 +92,17 @@ Every run has a `run_id`; every stage writes an artifact row before the next sta
 - **AI can never**: pick order types, sizes, accounts, or credentials. It returns validated JSON; prose is stored, never parsed into orders. Headlines are wrapped as untrusted data. Invalid output → retry once → neutral.
 - **Budgets:** per-day and per-month USD/token caps; main-model calls stop at 80%, everything stops at 100%. The local model costs $0 but is still metered.
 
+## V2 (2026-09-11)
+
+V2 upgrades the research layer without changing who may trade: **evidence-driven, point-in-time, measured**. Design: [docs/ai_quant_trading_system_v2_design.md](docs/ai_quant_trading_system_v2_design.md); what was built and why: [docs/v2_implementation.md](docs/v2_implementation.md).
+
+- **Two jobs a day.** `sea-lion research` after the close (documents, features, both AI arms) and `sea-lion run` in the morning (reconcile first, overnight delta, decision, orders in regular hours only). Both print one `SEA_LION_SUMMARY` line; exit code 2 means attention.
+- **Sources with timestamps.** Alpaca/Benzinga full-text news, SEC EDGAR filings (8-K/10-Q/10-K with acceptance times) and XBRL fundamentals, FRED macro, Yahoo as a flagged fallback. Every document has published/retrieved/available times, a hash, revisions, quality, and a quarantine path.
+- **Canonical events, not headlines.** Claims with verbatim evidence spans → clustered events with novelty and supersession → routing (filings first; macro and analyst notes gated) → audit → analyst → skeptic → context → synthesis into a 5/10/20-day forecast that can abstain.
+- **Three arms every day** from the same cutoff: A quant-only, B V1 headline overlay (current champion, trades), C V2 verified-event overlay (shadow, simulated fills). The report says whether the AI changed rank, membership, weights, or orders.
+- **Forecasts are frozen and scored** at 5/10/20 sessions; probabilities are shrunk toward 0.5 until 60 scored outcomes exist, then recalibrated.
+- **Risk sees the real book**: position count, sector, dust, pending orders, correlation clusters, portfolio beta, binary-event concentration, scenario exposures. Alerts by email on safe mode, aborts, AI fallback, ambiguous orders, missed deadlines.
+
 ## Week-one review (2026-09-11)
 
 Read [docs/review_v1.md](docs/review_v1.md). Short version: the loop ran every weekday, 19 of 21 orders filled, no duplicates or crashes; a bookkeeping bug (Alpaca's `pending_new` status missing from our open-order query) put the system into safe mode on Sep 10, which is exactly the fail-safe behaviour intended, and is fixed with regression tests. Safe mode must be cleared by a person: `sea-lion --mode paper safe-mode --clear --who <you>`. Add `MAILTO` to the crontab so this cannot go unnoticed again.
@@ -101,6 +122,11 @@ open runtime/reports/paper/latest.html     # today's decisions, risk reasons, or
 tail -f runtime/logs/cron.log              # what cron did this morning
 sea-lion --mode paper safe-mode --clear --who <you>   # only after reviewing a SAFE MODE banner
 sea-lion --mode paper kill                 # emergency: cancel all open orders, block new exposure
+sea-lion --mode paper run --dry-run        # full morning path without submitting
+sea-lion --mode paper sweep-dust [--confirm]   # list / close positions below the minimum order size
+sea-lion --mode paper score-outcomes       # score matured forecasts, print calibration
+sea-lion --mode paper notify-test          # send a test alert through the configured transport
+sea-lion --mode paper calendar             # session / decision-window state
 ```
 
 If the LLM server is down at 9:40 ET the run proceeds quant-only and says so in the report; bring it back with `../llm/serve.sh v4gguf --daemon`.

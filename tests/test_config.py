@@ -1,5 +1,3 @@
-import os
-
 from sea_lion import config as C
 
 

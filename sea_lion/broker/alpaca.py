@@ -88,6 +88,13 @@ class AlpacaBroker:
         res = self._c.cancel_orders()
         return len(res) if res else 0
 
+    def close_position(self, symbol: str, client_order_id: str) -> BrokerOrder:
+        """Exact-quantity liquidation of one position (used only by the audited dust sweep)."""
+        o = self._c.close_position(_to_alpaca(symbol))
+        bo = self._conv(o)
+        bo.client_order_id = client_order_id if not bo.client_order_id else bo.client_order_id
+        return bo
+
     @staticmethod
     def _conv(o: Any) -> BrokerOrder:
         return BrokerOrder(client_order_id=str(o.client_order_id), symbol=_from_alpaca(str(o.symbol)),

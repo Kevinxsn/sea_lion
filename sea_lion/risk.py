@@ -7,9 +7,9 @@ Nothing here calls a network or a model.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
-from .config import RiskCfg
+from .config import PortfolioRiskCfg, RiskCfg
 
 
 @dataclass
@@ -23,6 +23,13 @@ class AccountState:
     data_stale: bool = False
     safe_mode: bool = False
     market_open_next_session: bool = True
+    # ---- V2 (design §4.10, §13): the broker book is reality
+    pending_orders: Dict[str, float] = field(default_factory=dict)   # symbol -> signed notional of open orders
+    betas: Dict[str, float] = field(default_factory=dict)
+    clusters: Dict[str, int] = field(default_factory=dict)
+    binary_event_symbols: Set[str] = field(default_factory=set)
+    health_ok: bool = True
+    multiplier: float = 1.0
 
     def position_value(self, sym: str) -> float:
         return self.positions.get(sym, 0.0) * self.prices.get(sym, 0.0)
@@ -74,7 +81,8 @@ class RiskResult:
 
 
 def evaluate(proposal: Dict[str, float], acct: AccountState, sectors: Dict[str, str], cfg: RiskCfg,
-             rank_order: Optional[List[str]] = None) -> RiskResult:
+             rank_order: Optional[List[str]] = None, pcfg: Optional[PortfolioRiskCfg] = None,
+             is_live: bool = False) -> RiskResult:
     flags: List[str] = []
     block_new = False        # buys blocked
     hold_sells = False       # sells not auto-submitted; listed for manual review (safe mode)
@@ -109,7 +117,17 @@ def evaluate(proposal: Dict[str, float], acct: AccountState, sectors: Dict[str, 
     if not acct.market_open_next_session:
         flags.append("market_closed")
         no_orders = True
+    if not acct.health_ok:
+        flags.append("operational_health_failed")
+        block_new = True
+    if pcfg and pcfg.require_multiplier_one_live and is_live and float(acct.multiplier or 1) > 1.0:
+        flags.append(f"margin_account_multiplier_{acct.multiplier}")
+        block_new = no_orders = True
     explicit_zero = {s for s, w in proposal.items() if w == 0}
+    # book facts (design §13): actual holdings, dust, pending
+    dust = {s for s, q in acct.positions.items() if 0 < q * acct.prices.get(s, 0.0) < cfg.min_order_notional}
+    book_names = {s for s, q in acct.positions.items() if q * acct.prices.get(s, 0.0) >= cfg.min_order_notional}
+    pending_names = {s for s, n in acct.pending_orders.items() if n > 0}
 
     current = acct.weights()
     approved: Dict[str, float] = {}
@@ -132,13 +150,20 @@ def evaluate(proposal: Dict[str, float], acct: AccountState, sectors: Dict[str, 
             w = cfg.single_position_max
         approved[sym] = w
 
-    # ---- position count -----------------------------------------------------
+    # ---- position count (intended holdings = approved targets; existing names that stay count too) ----
     if len(approved) > cfg.max_positions:
         keep = [s for s in order if s in approved][: cfg.max_positions]
         for s in list(approved):
             if s not in keep:
                 note(s, 0.0, f"max_positions_{cfg.max_positions}")
                 del approved[s]
+    # names in the book or pending that are NOT in the proposal will be exited; if a lock keeps them, count them
+    resulting_names = set(approved) | ((book_names | pending_names) if block_new else set())
+    if len(resulting_names) > cfg.max_positions:
+        extra = [s for s in order if s in approved and s not in book_names][: max(0, len(resulting_names) - cfg.max_positions)]
+        for s in extra:
+            note(s, 0.0, f"book_position_count_{len(resulting_names)}>{cfg.max_positions}")
+            approved.pop(s, None)
 
     # ---- sector concentration (reduce the newest / lowest-ranked) ----------
     sector_tot: Dict[str, float] = {}
@@ -151,6 +176,35 @@ def evaluate(proposal: Dict[str, float], acct: AccountState, sectors: Dict[str, 
             approved[s] = neww
         sector_tot[sec] = sector_tot.get(sec, 0.0) + approved[s]
     approved = {s: w for s, w in approved.items() if w > 0}
+
+    # ---- V2: correlation clusters, portfolio beta, binary-event concentration ----
+    if pcfg:
+        if acct.clusters:
+            ctot: Dict[int, float] = {}
+            for s in [x for x in order if x in approved]:
+                cid = acct.clusters.get(s, -1)
+                room = pcfg.correlation_cluster_max - ctot.get(cid, 0.0)
+                if approved[s] > room + 1e-9:
+                    neww = max(room, 0.0)
+                    note(s, neww, f"correlation_cluster_cap_{cid}_{pcfg.correlation_cluster_max}")
+                    approved[s] = neww
+                ctot[cid] = ctot.get(cid, 0.0) + approved[s]
+            approved = {s: w for s, w in approved.items() if w > 0}
+        if acct.betas and approved:
+            pb = sum(w * float(acct.betas.get(s) if acct.betas.get(s) is not None else 1.0) for s, w in approved.items())
+            gross_now = sum(approved.values())
+            if gross_now > 0 and pb / gross_now * gross_now > pcfg.beta_max * 1.0 and pb > pcfg.beta_max:
+                k = pcfg.beta_max / pb
+                for s in approved:
+                    approved[s] *= k
+                    note(s, approved[s], f"beta_scaled_{k:.3f}")
+                flags.append(f"portfolio_beta_{pb:.2f}>{pcfg.beta_max}")
+        if acct.binary_event_symbols:
+            hot = [s for s in order if s in approved and s in acct.binary_event_symbols]
+            for s in hot[pcfg.max_binary_events:]:
+                if s not in current:            # only block NEW binary-event exposure
+                    note(s, 0.0, f"binary_event_concentration_>{pcfg.max_binary_events}")
+                    approved.pop(s, None)
 
     # ---- gross exposure -----------------------------------------------------
     gross = sum(approved.values())
@@ -246,8 +300,20 @@ def evaluate(proposal: Dict[str, float], acct: AccountState, sectors: Dict[str, 
         intents = [i for i in intents if i.side != "sell"]
         if held:
             flags.append("sells_held_for_manual_review")
+    book_sector: Dict[str, float] = {}
+    for s2, q in acct.positions.items():
+        if acct.equity > 0:
+            book_sector[sectors.get(s2, "Unknown")] = book_sector.get(sectors.get(s2, "Unknown"), 0.0) + q * acct.prices.get(s2, 0.0) / acct.equity
+    target_sector: Dict[str, float] = {}
+    for s2, w in approved.items():
+        target_sector[sectors.get(s2, "Unknown")] = target_sector.get(sectors.get(s2, "Unknown"), 0.0) + w
     stats = {"gross_target": sum(approved.values()), "n_positions": len(approved), "turnover": turnover,
-             "drawdown": dd, "day_pnl": day_pnl, "cash_before": acct.cash, "equity": acct.equity}
+             "drawdown": dd, "day_pnl": day_pnl, "cash_before": acct.cash, "equity": acct.equity,
+             "book": {"n_positions": len(book_names), "dust": sorted(dust), "pending_buy_names": sorted(pending_names),
+                      "gross_actual": round(sum(q * acct.prices.get(s2, 0.0) for s2, q in acct.positions.items()) / acct.equity, 4) if acct.equity > 0 else 0.0,
+                      "sector_actual": {k: round(v, 4) for k, v in book_sector.items()},
+                      "sector_target": {k: round(v, 4) for k, v in target_sector.items()},
+                      "beta_target": round(sum(w * float(acct.betas.get(s2) if acct.betas.get(s2) is not None else 1.0) for s2, w in approved.items()), 3) if acct.betas else None}}
     return RiskResult(approved={s: round(w, 6) for s, w in approved.items()}, intents=intents,
                       decisions=list(decisions.values()), global_flags=flags, block_new_exposure=block_new,
                       enter_safe_mode=enter_safe, stats=stats, held_for_review=held)

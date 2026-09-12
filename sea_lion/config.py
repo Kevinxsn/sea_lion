@@ -124,7 +124,7 @@ class BudgetCfg(BaseModel):
     monthly_main_usd: float = 10.0
     monthly_total_usd: float = 25.0
     soft_stop_fraction: float = 0.8
-    daily_tokens: int = 400_000
+    daily_tokens: int = 5_000_000
 
 
 class AICfg(BaseModel):
@@ -168,6 +168,108 @@ class ReportingCfg(BaseModel):
     write_json: bool = True
 
 
+class NotifyCfg(BaseModel):
+    enabled: bool = True
+    email_to: List[str] = []
+    email_from: str = "sea-lion@localhost"
+    transport: Literal["sendmail", "smtp", "fake", "none"] = "sendmail"
+    smtp_host: str = "127.0.0.1"
+    smtp_port: int = 25
+    smtp_starttls: bool = False
+    # severities that trigger an email (info never does)
+    email_severities: List[str] = ["critical", "warning"]
+    max_retries: int = 2
+
+
+class CalendarCfg(BaseModel):
+    provider: Literal["alpaca", "fallback"] = "alpaca"
+    cache_days: int = 120
+    research_time_local: str = "16:30"       # after-close research job (ET)
+    decision_window_local: List[str] = ["09:35", "15:30"]   # paper/live orders only inside this window
+
+
+class SourcesCfg(BaseModel):
+    news_primary: Literal["alpaca", "yfinance", "none"] = "alpaca"
+    news_fallback: Literal["yfinance", "none"] = "yfinance"
+    news_include_content: bool = True
+    news_max_content_chars: int = 6000
+    sec_enabled: bool = True
+    sec_user_agent: str = "sea-lion research (contact: kevinxsn@outlook.com)"
+    sec_forms: List[str] = ["8-K", "10-Q", "10-K", "8-K/A", "10-Q/A", "10-K/A"]
+    sec_lookback_days: int = 5
+    fred_enabled: bool = True
+    fred_series: List[str] = ["DGS10", "DGS2", "T10Y2Y", "VIXCLS", "BAMLH0A0HYM2", "DTWEXBGS"]
+    fred_lookback_days: int = 400
+    fundamentals_enabled: bool = True
+    fundamentals_max_age_days: int = 400
+    quarantine_future_dated: bool = True
+
+
+class ResearchCfg(BaseModel):
+    """V2 multi-pass research. Passes run on the same local model; 'depth' not price."""
+    enabled: bool = True
+    max_documents_per_symbol: int = 4
+    max_claims_per_event: int = 12
+    max_evidence_spans: int = 6
+    material_importance: float = 0.5
+    macro_gate_importance: float = 0.70
+    analyst_requires_corroboration: bool = True
+    main_candidates: int = 8
+    reserve_for_filings: int = 3            # main-tier slots that macro/analyst items cannot displace
+    audit_material_only: bool = True
+    skeptic_enabled: bool = True
+    context_enabled: bool = True
+    disagreement_abstain: float = 0.5       # |analyst - skeptic| p gap above which we abstain
+    evidence_quality_floor: float = 0.4     # below -> neutral overlay
+    shrink_to_half: float = 0.5             # p' = 0.5 + (p-0.5)*shrink until calibration exists
+    horizons: List[int] = [5, 10, 20]
+    stage_deadline_sec: int = 1800          # per research stage (after-close job)
+    morning_deadline_sec: int = 600         # decision-to-order hard limit (design: <10 min)
+    morning_target_sec: int = 180
+    morning_delta_max_docs: int = 6          # overnight delta: extract at most this many documents (candidates/holdings only)
+    concurrency: int = 4
+
+
+class HysteresisCfg(BaseModel):
+    enabled: bool = False                   # shadow challenger until evaluated (design §12.1)
+    entry_rank: int = 10
+    retention_rank: int = 15
+    score_band: float = 0.05                # keep holding if within this of the 10th-ranked score
+    replacement_margin: float = 0.08        # incoming must beat outgoing by this after round-trip cost
+    round_trip_cost: float = 0.0010
+
+
+class ArmsCfg(BaseModel):
+    enabled: bool = True
+    orders_arm: Literal["A", "B", "C"] = "B"   # A quant-only, B V1 headline overlay, C V2 verified-event overlay
+    shadow_slippage_bps: float = 5.0
+
+
+class PortfolioRiskCfg(BaseModel):
+    correlation_cluster_max: float = 0.25
+    correlation_threshold: float = 0.80
+    correlation_window: int = 60
+    beta_max: float = 1.0
+    max_binary_events: int = 2
+    scenarios: Dict[str, float] = {"market_-3pct": -0.03, "tech_-5pct": -0.05, "largest_gap_-10pct": -0.10}
+    require_multiplier_one_live: bool = True
+    spread_max_bps: float = 30.0
+
+
+class V2Cfg(BaseModel):
+    enabled: bool = True
+    calendar: CalendarCfg = CalendarCfg()
+    sources: SourcesCfg = SourcesCfg()
+    research: ResearchCfg = ResearchCfg()
+    hysteresis: HysteresisCfg = HysteresisCfg()
+    arms: ArmsCfg = ArmsCfg()
+    portfolio_risk: PortfolioRiskCfg = PortfolioRiskCfg()
+    feature_version: str = "v2.0"
+    forecast_version: str = "v2.0"
+    prompt_version: str = "v2"
+    calibration_min_samples: int = 60
+
+
 class Settings(BaseModel):
     run: RunCfg
     universe: UniverseCfg
@@ -179,6 +281,8 @@ class Settings(BaseModel):
     broker: BrokerCfg = BrokerCfg()
     costs: CostsCfg = CostsCfg()
     reporting: ReportingCfg = ReportingCfg()
+    notify: NotifyCfg = NotifyCfg()
+    v2: V2Cfg = V2Cfg()
 
     # populated by load()
     config_path: Optional[str] = None

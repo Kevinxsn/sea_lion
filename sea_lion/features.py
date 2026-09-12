@@ -25,14 +25,68 @@ class Panel:
     close: pd.DataFrame
     volume: pd.DataFrame
     open: pd.DataFrame
+    high: Optional[pd.DataFrame] = None
+    low: Optional[pd.DataFrame] = None
 
     @classmethod
     def from_long(cls, bars: pd.DataFrame) -> "Panel":
         piv = lambda col: bars.pivot(index="date", columns="symbol", values=col).sort_index()  # noqa: E731
-        return cls(adj_close=piv("adj_close"), close=piv("close"), volume=piv("volume"), open=piv("open"))
+        return cls(adj_close=piv("adj_close"), close=piv("close"), volume=piv("volume"), open=piv("open"),
+                   high=piv("high") if "high" in bars else None, low=piv("low") if "low" in bars else None)
 
 
-def compute_feature_panel(panel: Panel, cfg: FeatureCfg) -> Dict[str, pd.DataFrame]:
+# ---------------------------------------------------------------- V2 feature registry (design §9)
+# Every feature: family, definition, lookback, lag, missing behaviour, version. Production quant score
+# still uses only the V1 signals; the rest are stored, shown to research passes, and used by risk.
+FEATURE_REGISTRY: Dict[str, Dict[str, object]] = {
+    "mom_short":     {"family": "momentum", "version": "v1", "lookback": 20, "lag": 1, "missing": "ineligible", "production": True,
+                      "definition": "adj_close[t-1]/adj_close[t-21]-1"},
+    "mom_long":      {"family": "momentum", "version": "v1", "lookback": 60, "lag": 1, "missing": "ineligible", "production": True,
+                      "definition": "adj_close[t-1]/adj_close[t-61]-1"},
+    "trend":         {"family": "trend", "version": "v1", "lookback": 50, "lag": 0, "missing": "ineligible", "production": True,
+                      "definition": "adj_close/MA50-1"},
+    "vol":           {"family": "volatility", "version": "v1", "lookback": 20, "lag": 0, "missing": "ineligible", "production": True,
+                      "definition": "std(log returns,20)*sqrt(252)"},
+    "dollar_volume": {"family": "liquidity", "version": "v1", "lookback": 20, "lag": 0, "missing": "ineligible", "production": True,
+                      "definition": "mean(close*volume,20)"},
+    "volume_ratio":  {"family": "liquidity", "version": "v1", "lookback": 20, "lag": 1, "missing": "zero", "production": True,
+                      "definition": "volume/mean(volume,20 lagged 1)"},
+    "mom_5":         {"family": "momentum", "version": "v2.0", "lookback": 5, "lag": 1, "missing": "nan", "production": False,
+                      "definition": "adj_close[t-1]/adj_close[t-6]-1"},
+    "mom_120":       {"family": "momentum", "version": "v2.0", "lookback": 120, "lag": 1, "missing": "nan", "production": False,
+                      "definition": "adj_close[t-1]/adj_close[t-121]-1"},
+    "trend_20":      {"family": "trend", "version": "v2.0", "lookback": 20, "lag": 0, "missing": "nan", "production": False,
+                      "definition": "adj_close/MA20-1"},
+    "trend_200":     {"family": "trend", "version": "v2.0", "lookback": 200, "lag": 0, "missing": "nan", "production": False,
+                      "definition": "adj_close/MA200-1"},
+    "ma50_slope":    {"family": "trend", "version": "v2.0", "lookback": 70, "lag": 0, "missing": "nan", "production": False,
+                      "definition": "MA50[t]/MA50[t-20]-1"},
+    "resid_1":       {"family": "mean_reversion", "version": "v2.0", "lookback": 1, "lag": 0, "missing": "nan", "production": False,
+                      "definition": "1d return minus SPY 1d return"},
+    "resid_5":       {"family": "mean_reversion", "version": "v2.0", "lookback": 5, "lag": 0, "missing": "nan", "production": False,
+                      "definition": "5d return minus SPY 5d return"},
+    "rs_spy_20":     {"family": "relative_strength", "version": "v2.0", "lookback": 20, "lag": 1, "missing": "nan", "production": False,
+                      "definition": "mom_short minus SPY mom_short"},
+    "rs_sector_20":  {"family": "relative_strength", "version": "v2.0", "lookback": 20, "lag": 1, "missing": "nan", "production": False,
+                      "definition": "mom_short minus sector-ETF mom_short"},
+    "downside_vol":  {"family": "volatility", "version": "v2.0", "lookback": 20, "lag": 0, "missing": "nan", "production": False,
+                      "definition": "std of negative log returns,20 * sqrt(252)"},
+    "range_20":      {"family": "volatility", "version": "v2.0", "lookback": 20, "lag": 0, "missing": "nan", "production": False,
+                      "definition": "mean((high-low)/close,20)"},
+    "gap_risk":      {"family": "volatility", "version": "v2.0", "lookback": 20, "lag": 0, "missing": "nan", "production": False,
+                      "definition": "mean(|open/prev_close-1|,20)"},
+    "beta_60":       {"family": "market_risk", "version": "v2.0", "lookback": 60, "lag": 0, "missing": "one", "production": False,
+                      "definition": "cov(r,r_spy,60)/var(r_spy,60)"},
+    "corr_spy_60":   {"family": "market_risk", "version": "v2.0", "lookback": 60, "lag": 0, "missing": "nan", "production": False,
+                      "definition": "corr(r,r_spy,60)"},
+    "drawdown_60":   {"family": "market_risk", "version": "v2.0", "lookback": 60, "lag": 0, "missing": "nan", "production": False,
+                      "definition": "adj_close/max(adj_close,60)-1"},
+}
+V2_FEATURE_COLS = [k for k, v in FEATURE_REGISTRY.items() if v["version"] != "v1"]
+
+
+def compute_feature_panel(panel: Panel, cfg: FeatureCfg, benchmark: str = "SPY",
+                          sector_etf: Optional[Dict[str, str]] = None) -> Dict[str, pd.DataFrame]:
     """Full-history feature panels (date x symbol). Each cell at date t uses only data <= t."""
     ac, cl, vo = panel.adj_close, panel.close, panel.volume
     k = cfg.skip_last_day
@@ -45,8 +99,99 @@ def compute_feature_panel(panel: Panel, cfg: FeatureCfg) -> Dict[str, pd.DataFra
     vol = logret.rolling(cfg.vol_window, min_periods=cfg.vol_window).std() * np.sqrt(252.0)
     dv = (cl * vo).rolling(cfg.volume_ma, min_periods=cfg.volume_ma).mean()
     vol_ratio = vo / vo.rolling(cfg.volume_ma, min_periods=cfg.volume_ma).mean().shift(1)
-    return {"mom_short": mom_s, "mom_long": mom_l, "trend": trend, "above_trend": (trend > 0).astype(float),
-            "vol": vol, "dollar_volume": dv, "volume_ratio": vol_ratio, "close": cl, "adj_close": ac}
+    out = {"mom_short": mom_s, "mom_long": mom_l, "trend": trend, "above_trend": (trend > 0).astype(float),
+           "vol": vol, "dollar_volume": dv, "volume_ratio": vol_ratio, "close": cl, "adj_close": ac}
+    # ---- V2 families (all backward-looking) ----
+    out["mom_5"] = lag / ac.shift(k + 5) - 1.0
+    out["mom_120"] = lag / ac.shift(k + 120) - 1.0
+    out["trend_20"] = ac / ac.rolling(20, min_periods=20).mean() - 1.0
+    out["trend_200"] = ac / ac.rolling(200, min_periods=200).mean() - 1.0
+    out["ma50_slope"] = ma / ma.shift(20) - 1.0
+    neg = logret.where(logret < 0, 0.0)
+    out["downside_vol"] = neg.rolling(cfg.vol_window, min_periods=cfg.vol_window).std() * np.sqrt(252.0)
+    if panel.high is not None and panel.low is not None:
+        out["range_20"] = ((panel.high - panel.low) / cl).rolling(20, min_periods=20).mean()
+    out["gap_risk"] = (panel.open / cl.shift(1) - 1.0).abs().rolling(20, min_periods=20).mean()
+    out["drawdown_60"] = ac / ac.rolling(60, min_periods=20).max() - 1.0
+    if benchmark in ac.columns:
+        r = ac.pct_change()
+        rb = r[benchmark]
+        out["resid_1"] = r.sub(rb, axis=0)
+        r5 = ac / ac.shift(5) - 1.0
+        out["resid_5"] = r5.sub(r5[benchmark], axis=0)
+        out["rs_spy_20"] = mom_s.sub(mom_s[benchmark], axis=0)
+        cov = r.rolling(60, min_periods=40).cov(rb)
+        var = rb.rolling(60, min_periods=40).var()
+        out["beta_60"] = cov.div(var, axis=0)
+        out["corr_spy_60"] = r.rolling(60, min_periods=40).corr(rb)
+        if sector_etf:
+            rs = mom_s.copy()
+            for sym in rs.columns:
+                etf = sector_etf.get(sym, benchmark)
+                rs[sym] = mom_s[sym] - (mom_s[etf] if etf in mom_s.columns else mom_s[benchmark])
+            out["rs_sector_20"] = rs
+    return out
+
+
+def snapshot_rows(feat: pd.DataFrame, cols: Optional[List[str]] = None) -> List[Dict[str, object]]:
+    """Rows for feature_snapshots with explicit missingness flags."""
+    cols = cols or [c for c in FEATURE_REGISTRY if c in feat.columns]
+    rows = []
+    for sym, r in feat.iterrows():
+        vals, missing = {}, []
+        for c in cols:
+            v = r.get(c)
+            if v is None or (isinstance(v, float) and np.isnan(v)):
+                missing.append(c)
+            else:
+                vals[c] = round(float(v), 6)
+        rows.append({"symbol": sym, "values": vals, "missing": missing})
+    return rows
+
+
+def fundamental_features(store, symbols: List[str], as_of: str) -> Dict[str, Dict[str, Optional[float]]]:
+    """Point-in-time (filed <= as_of) YoY growth, margin, and filing age. ETFs/no data -> None + missing flag."""
+    out: Dict[str, Dict[str, Optional[float]]] = {}
+    for sym in symbols:
+        f: Dict[str, Optional[float]] = {"rev_yoy": None, "eps_yoy": None, "net_margin": None, "days_since_filing": None}
+        rev = [r for r in store.fundamentals_asof(sym, "revenue", as_of) if not str(r.get("fp", "")).endswith("_FY")]
+        ni = [r for r in store.fundamentals_asof(sym, "net_income", as_of) if not str(r.get("fp", "")).endswith("_FY")]
+        eps = [r for r in store.fundamentals_asof(sym, "eps_diluted", as_of) if not str(r.get("fp", "")).endswith("_FY")]
+
+        def yoy(rows):
+            if len(rows) < 5:
+                return None
+            last, prev = rows[-1], rows[-5]
+            return (last["value"] / prev["value"] - 1.0) if prev["value"] else None
+        f["rev_yoy"] = yoy(rev)
+        f["eps_yoy"] = yoy(eps) if eps and eps[-1]["value"] and len(eps) >= 5 and eps[-5]["value"] > 0 else None
+        if rev and ni and rev[-1]["period_end"] == ni[-1]["period_end"] and rev[-1]["value"]:
+            f["net_margin"] = ni[-1]["value"] / rev[-1]["value"]
+        latest_filed = max([r["filed"] for r in rev + ni] or [None])
+        if latest_filed:
+            from datetime import date as _d
+            f["days_since_filing"] = float((_d.fromisoformat(as_of) - _d.fromisoformat(latest_filed)).days)
+        out[sym] = f
+    return out
+
+
+def macro_features(store, as_of: str, cutoff: Optional[str] = None) -> Dict[str, Optional[float]]:
+    """Market-level macro state: observations with effective_date <= as_of that were AVAILABLE by the
+    run cutoff (live retrieval happens after the session, so availability is the run time)."""
+    def series(name):
+        rows = store.macro_series(name, cutoff or "9999")
+        return [(r["effective_date"], r["value"]) for r in rows if r["effective_date"] <= as_of]
+
+    def level(name):
+        s = series(name)
+        return s[-1][1] if s else None
+
+    def change(name, n):
+        s = series(name)
+        return (s[-1][1] - s[-1 - n][1]) if len(s) > n else None
+    return {"dgs10": level("DGS10"), "dgs10_chg20": change("DGS10", 20), "t10y2y": level("T10Y2Y"), "vix": level("VIXCLS"),
+            "vix_chg5": change("VIXCLS", 5), "hy_spread": level("BAMLH0A0HYM2"), "hy_spread_chg20": change("BAMLH0A0HYM2", 20),
+            "dollar_chg20": change("DTWEXBGS", 20)}
 
 
 def features_at(fp: Dict[str, pd.DataFrame], as_of: str, symbols: Optional[List[str]] = None) -> pd.DataFrame:

@@ -148,6 +148,13 @@ class SimBroker:
         self._persist(self.s)
         return n
 
+    def close_position(self, symbol: str, client_order_id: str) -> BrokerOrder:
+        pos = self.s["positions"].get(symbol)
+        if not pos:
+            raise BrokerError("no position")
+        px = self.s["prices"].get(symbol, pos["avg_price"])
+        return self.submit_limit_order(symbol, "sell", pos["qty"], px * 0.99, client_order_id, reference_price=px)
+
     @staticmethod
     def _to_order(o: Dict[str, Any]) -> BrokerOrder:
         st = o["status"]

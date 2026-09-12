@@ -45,9 +45,77 @@ def cmd_run(args) -> int:
     if cfg.run.mode == "live" and not args.i_understand_live:
         print("live mode requires --i-understand-live in addition to the env gates", file=sys.stderr)
         return 2
-    res = Pipeline(cfg, st).run(as_of=as_of, force=args.force)
-    print(json.dumps(res, indent=1, default=str))
-    return 0 if res["status"] in ("ok", "skipped_already_completed") else 1
+    res = Pipeline(cfg, st).run(as_of=as_of, force=args.force, dry_run=args.dry_run)
+    print(json.dumps({k: v for k, v in res.items() if k != "summary_line"}, indent=1, default=str))
+    print(res.get("summary_line", ""))
+    # exit codes: 0 ok, 1 error, 2 attention (safe mode, abort, AI fallback in paper/live, ambiguous, deadline)
+    if res["status"] == "error":
+        return 1
+    return 2 if (res.get("summary") or {}).get("attention") else 0
+
+
+def cmd_research(args) -> int:
+    """After-close research job (design §5.2): bars, documents, features, arm-B and arm-C research, cached for the morning."""
+    from .pipeline import Pipeline
+    cfg = _load(args)
+    st = _store(cfg)
+    as_of = date.fromisoformat(args.as_of) if args.as_of else None
+    res = Pipeline(cfg, st).research(as_of=as_of, force=args.force)
+    print(json.dumps({k: v for k, v in res.items() if k != "summary_line"}, indent=1, default=str))
+    print(res.get("summary_line", ""))
+    return 0 if res["status"] in ("ok", "exists") else 1
+
+
+def cmd_sweep_dust(args) -> int:
+    from .execution import sweep_dust
+    from .pipeline import Pipeline
+    cfg = _load(args)
+    st = _store(cfg)
+    br = Pipeline(cfg, st).broker()
+    out = sweep_dust(br, st, cfg, f"dust-{date.today().isoformat()}", confirm=args.confirm)
+    print(json.dumps(out, indent=1, default=str))
+    if not args.confirm and out["candidates"]:
+        print("re-run with --confirm to close the positions above", file=sys.stderr)
+    return 0
+
+
+def cmd_notify_test(args) -> int:
+    from .notify import Notifier
+    cfg = _load(args)
+    st = _store(cfg)
+    n = Notifier(cfg.notify, st, cfg.run.mode)
+    hid = n.event("warning", "notify-test", f"test notification requested by {args.who or 'operator'}", remediation="none; this is a test")
+    rows = st.q("SELECT channel,status,attempt,error FROM notification_attempts WHERE health_event_id=?", (hid,))
+    print(json.dumps({"health_event_id": hid, "transport": cfg.notify.transport, "to": cfg.notify.email_to, "attempts": [dict(r) for r in rows]}, indent=1))
+    return 0 if rows and all(r["status"] == "sent" for r in rows) else 1
+
+
+def cmd_score_outcomes(args) -> int:
+    from . import forecasts as FC
+    from .features import Panel
+    cfg = _load(args)
+    st = _store(cfg)
+    import pandas as pd
+    rows = st.bars(cfg.universe.tickers, "2000-01-01", "9999")
+    if not rows:
+        print("no bars in store"); return 1
+    bars = pd.DataFrame([dict(r) for r in rows])
+    panel = Panel.from_long(bars)
+    out = FC.score_outcomes(st, list(panel.adj_close.index), panel.adj_close, cfg.universe.benchmark, cfg.v2.research.horizons)
+    stats = {h: FC.calibration_stats(st.scored_outcomes(h)) for h in cfg.v2.research.horizons}
+    fit = {h: FC.maybe_fit(st, h, cfg.v2.calibration_min_samples, cfg.v2.forecast_version) for h in cfg.v2.research.horizons}
+    print(json.dumps({"scored": out, "calibration": stats, "fitted": {h: bool(v) for h, v in fit.items()}}, indent=1, default=str))
+    return 0
+
+
+def cmd_calendar(args) -> int:
+    from .pipeline import Pipeline
+    cfg = _load(args)
+    cal = Pipeline(cfg, _store(cfg)).calendar()
+    print(json.dumps({"source": cal.source, "market_state": cal.market_state(), "last_completed_session": cal.last_completed_session(),
+                      "next_session": (cal.next_session(date.today().isoformat()) or {}).__dict__ if cal.next_session(date.today().isoformat()) else None,
+                      "in_decision_window": cal.in_decision_window(cfg.v2.calendar.decision_window_local)}, indent=1, default=str))
+    return 0
 
 
 def cmd_resume(args) -> int:
@@ -209,8 +277,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     p = sub.add_parser("run", help="run one daily decision cycle")
     p.add_argument("--as-of", default=None, help="decision date YYYY-MM-DD (default: latest completed session)")
     p.add_argument("--force", action="store_true", help="run even if this session already completed")
+    p.add_argument("--dry-run", action="store_true", help="everything except order submission")
     p.add_argument("--i-understand-live", action="store_true")
     p.set_defaults(fn=cmd_run)
+    p = sub.add_parser("research", help="after-close research job (documents, features, arm B + arm C research); cached for the morning run")
+    p.add_argument("--as-of", default=None); p.add_argument("--force", action="store_true"); p.set_defaults(fn=cmd_research)
+    p = sub.add_parser("sweep-dust", help="list (and with --confirm close) positions below the minimum order size")
+    p.add_argument("--confirm", action="store_true"); p.set_defaults(fn=cmd_sweep_dust)
+    p = sub.add_parser("notify-test", help="send a test notification through the configured transport")
+    p.add_argument("--who", default=None); p.set_defaults(fn=cmd_notify_test)
+    p = sub.add_parser("score-outcomes", help="score matured forecasts and report calibration"); p.set_defaults(fn=cmd_score_outcomes)
+    p = sub.add_parser("calendar", help="show trading-calendar state"); p.set_defaults(fn=cmd_calendar)
     p = sub.add_parser("resume", help="resume a crashed run (same run_id, no duplicate orders)")
     p.add_argument("run_id"); p.set_defaults(fn=cmd_resume)
     p = sub.add_parser("replay", help="re-derive a run's proposal from stored inputs and compare")

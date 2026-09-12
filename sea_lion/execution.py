@@ -125,3 +125,31 @@ def kill_switch(broker: Broker, store: Store, reason: str, run_id: Optional[str]
         store.upsert_order(o)
     store.enter_safe_mode(f"kill_switch: {reason}", run_id)
     return {"canceled": n, "safe_mode": True}
+
+
+def sweep_dust(broker: Broker, store: Store, cfg: Settings, run_id: str, confirm: bool = False) -> Dict[str, Any]:
+    """Idempotent maintenance (design §14): list positions worth less than the minimum order size;
+    close them only with confirm=True (exact-quantity close), recording each cleanup."""
+    acct = broker.account()
+    dust = [{"symbol": s, "qty": p.qty, "value": round(p.market_value, 2)} for s, p in acct.positions.items()
+            if 0 < p.market_value < cfg.risk.min_order_notional]
+    out: Dict[str, Any] = {"candidates": dust, "closed": [], "errors": [], "confirmed": confirm}
+    if not confirm:
+        return out
+    for d in dust:
+        cid = client_order_id(run_id, d["symbol"], "sell", "dust-sweep")
+        if store.order(cid):
+            out["closed"].append({**d, "cid": cid, "note": "already_recorded"})
+            continue
+        try:
+            close = getattr(broker, "close_position", None)
+            if close is None:
+                raise BrokerError("broker has no close_position")
+            bo = close(d["symbol"], cid)
+            row = bo.to_row(run_id, d["value"]); row["raw"] = {"reason": "dust_sweep"}
+            store.upsert_order(row)
+            store.add_health_event("info", "dust_sweep", f"closed dust {d['symbol']} qty {d['qty']}", run_id)
+            out["closed"].append({**d, "cid": cid, "status": bo.status})
+        except Exception as e:  # noqa: BLE001
+            out["errors"].append({**d, "error": str(e)[:200]})
+    return out

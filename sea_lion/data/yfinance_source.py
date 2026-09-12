@@ -117,3 +117,21 @@ def _parse_item(sym: str, it: dict) -> Event | None:
         url = c["link"]
     return Event(symbol=sym, published_at=str(pub), title=title[:300], summary=summary[:1200],
                  source=str(source or "yahoo"), url=url)
+
+
+class YFinanceNewsDocuments:
+    """V2 fallback: Yahoo headlines as SourceDocuments (no body; degraded provenance flag)."""
+    name = "yahoo"
+
+    def fetch_documents(self, symbols: List[str], since: datetime, limit: int = 10):
+        from .documents import LOW_QUALITY_TITLE, SourceDocument, now_utc
+        out = []
+        for e in YFinanceNews().fetch_events(symbols, since, limit):
+            q = 0.30 if LOW_QUALITY_TITLE.search(e.title) else 0.50
+            retrieved = now_utc().isoformat(timespec="seconds")
+            out.append(SourceDocument(doc_id=f"yahoo_{e.event_id}", source="yahoo", doc_type="news", symbols=[e.symbol],
+                                      primary_symbol=e.symbol, title=e.title, summary=e.summary, url=e.url,
+                                      published_at=e.published_at, retrieved_at=retrieved, available_at=e.published_at,
+                                      event_time=e.published_at, source_quality=q, license_flags="headline_only",
+                                      meta={"provenance": "fallback", "source_name": e.source}))
+        return out

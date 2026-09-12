@@ -4,7 +4,6 @@ from sea_lion.broker.base import OPEN_STATUSES
 from sea_lion.broker.sim import SimBroker, empty_state
 from sea_lion.config import RiskCfg
 from sea_lion.reconcile import reconcile
-from sea_lion.risk import OrderIntent
 
 
 def test_store_open_orders_covers_every_broker_open_status(store):
